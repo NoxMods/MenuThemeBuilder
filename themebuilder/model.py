@@ -212,14 +212,44 @@ def save_project(theme, root: Path):
     (root / PROJECT_FILE).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _coerce(value, default):
+    """A value from a project file, forced to the type of the field's default (or the default itself)."""
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else default
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+    for kind in (str, list, dict):
+        if isinstance(default, kind):
+            return value if isinstance(value, kind) else default
+    return value
+
+
+def _build(cls, data):
+    base = cls()
+    return cls(**{k: _coerce(data[k], getattr(base, k)) for k in cls.__dataclass_fields__ if k in data})
+
+
+def _dicts(value):
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
 def load_project(root: Path):
     root = Path(root)
     data = json.loads((root / PROJECT_FILE).read_text(encoding="utf-8"))
-    tracks = [Track(**t) for t in data.pop("tracks", [])]
-    clips = [Clip(**c) for c in data.pop("clips", [])]
-    known = Theme.__dataclass_fields__
-    t = Theme(**{k: v for k, v in data.items() if k in known})
+    if not isinstance(data, dict):
+        raise ValueError(f"{PROJECT_FILE} is not a valid project file.")
+    tracks = [_build(Track, x) for x in _dicts(data.pop("tracks", []))]
+    clips = [_build(Clip, x) for x in _dicts(data.pop("clips", []))]
+    t = _build(Theme, data)
     t.tracks, t.clips = tracks, clips
+    t.backgrounds = [p for p in t.backgrounds if isinstance(p, str)]
+    t.layouts = [i for i in t.layouts if i in LAYOUTS]
+    t.cards = {k: v for k, v in t.cards.items() if k in BUTTON_IDS and isinstance(v, str)}
 
     def absol(p):
         pp = Path(p)

@@ -17,6 +17,17 @@ def find_mod_root(folder: Path):
     return None
 
 
+def _inside(base, rel):
+    """A file under base for a path written in the imported mod's own files; None if it is missing or leaves base."""
+    try:
+        base = Path(base).resolve()
+        p = (base / rel).resolve()
+        p.relative_to(base)
+        return p if p.is_file() else None
+    except (ValueError, OSError):
+        return None
+
+
 def _read(p, strip_comments=False):
     try:
         text = Path(p).read_text(encoding="utf-8", errors="replace")
@@ -94,7 +105,7 @@ def import_theme(folder):
     bgs = re.findall(r'"([^"]+\.(?:png|jpg|jpeg))"', _block(config_lua, "BG_IMAGES") or "")
     if not bgs:
         bgs = re.findall(r'"([^"]+\.(?:png|jpg|jpeg))"', _block(theme_lua, "backgrounds") or "")
-    t.backgrounds = [str(base / b) for b in bgs if (base / b).is_file()]
+    t.backgrounds = [str(p) for p in (_inside(base, b) for b in bgs) if p]
     if len(t.backgrounds) < len(bgs):
         notes.append("Some background images were listed but not found on disk.")
     t.hold_ms = _num(config_lua, "IMAGE_HOLD_MS", t.hold_ms)
@@ -115,8 +126,9 @@ def import_theme(folder):
     block = _block(theme_lua, "music")
     for e in re.finditer(r'\{\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*(\d+)', block or ""):
         sname, title, length = e.group(1), e.group(2), int(e.group(3))
-        if sname in sounds and (base / sounds[sname]).is_file():
-            t.tracks.append(Track(str(base / sounds[sname]), title, length))
+        sp = _inside(base, sounds[sname]) if sname in sounds else None
+        if sp:
+            t.tracks.append(Track(str(sp), title, length))
     t.repeat_one = bool(re.search(r"musicRepeatOne\s*=\s*true", theme_lua))
     if block and not t.tracks:
         notes.append("Music was declared but its .ogg files could not be matched.")
@@ -128,17 +140,19 @@ def import_theme(folder):
     parts = re.split(r'video\s*=\s*"', config_lua)[1:]
     for part in parts:
         vname = part.split('"', 1)[0]
-        vf = base / "media" / "videos" / vname
-        if not vf.is_file():
+        vf = _inside(base / "media" / "videos", vname)
+        if not vf or vf.suffix.lower() != ".bik":
             continue
         seg = part
         c = Clip(video=str(vf))
         sm = re.search(r'still\s*=\s*"([^"]+)"', seg)
-        if sm and (base / sm.group(1)).is_file():
-            c.still = str(base / sm.group(1))
+        stp = _inside(base, sm.group(1)) if sm else None
+        if stp:
+            c.still = str(stp)
         sm = re.search(r'sound\s*=\s*"(\w+)"', seg)
-        if sm and sm.group(1) in sounds and (base / sounds[sm.group(1)]).is_file():
-            c.sound = str(base / sounds[sm.group(1)])
+        snp = _inside(base, sounds[sm.group(1)]) if sm and sm.group(1) in sounds else None
+        if snp:
+            c.sound = str(snp)
         c.width, c.height = _num(seg, "width", 1920), _num(seg, "height", 1080)
         c.length_ms = _num(seg, "lengthMs", 0)
         c.sound_volume = _num(seg, "soundVolume", 100)
