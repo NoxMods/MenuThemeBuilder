@@ -36,3 +36,11 @@ Menu Theme Builder was created by [JFlowersB](https://github.com/JFlowersB) (Age
 
 ## Licence
 MIT, see [LICENSE](LICENSE). Copyright (c) 2026 JFlowersB and MenuThemeBuilder contributors.
+
+## Web Builder
+`web/` is the browser version (no install, nothing leaves the computer). It is released from here:
+1. Bump the version in both `themebuilder/__init__.py` and `web/js/version.js`, and add notes for it at the top of `web/js/changelog.js` (shown by the page's Changelog button).
+2. `python release_web.py` checks the two versions and the changelog agree and writes `RELEASE_NOTES.md` for the GitHub Release (tag `vX.X.X`).
+3. `python release_web.py --site <website repo>` also copies `web/` to `MenuThemeBuilder/` in the website repo, ready to commit.
+
+The page uses the website's shared fonts and images (`../../fonts`, `../../img`), so it is previewed with the website repo as a fallback root.

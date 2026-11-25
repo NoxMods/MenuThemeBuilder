@@ -27,3 +27,4 @@ node_modules/
 Thumbs.db
 *.log
 .env
+RELEASE_NOTES.md

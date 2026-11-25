@@ -1,7 +1,8 @@
 """Turns a .ttf/.otf into the bitmap font files Project Zomboid reads (AngelCode .fnt + .png atlas).
 
-The game only lets a mod replace its own font slots. Menu Theme Framework uses MainMenu1 (media/fonts/EN/mainfont.fnt)
-for the main-menu buttons, in five size tiers (the folder itself and 1x..4x, one per 'Font Size' option of the game).
+Menu Theme Framework draws a theme's button fonts itself, so the files are named after the theme
+(media/fonts/<Prefix>/<Prefix>_<Font>.fnt, listed in `menu.fonts`) and cannot collide with another theme's font.
+They come in five size tiers (the folder itself and 1x..4x, one per 'Font Size' option of the game).
 The sizes below are the ones the Menu Theme Template uses.
 """
 import math
@@ -10,7 +11,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QPointF, QPoint
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetricsF, QImage, QPainter
 
-FONT_FILE = "mainfont"          # -> mainfont.fnt / mainfont_0.png  (game slot MainMenu1)
 TIERS = [("", 18), ("1x", 24), ("2x", 27), ("3x", 34), ("4x", 37)]
 ATLAS_SIZES = (256, 512, 1024, 2048)
 
@@ -153,8 +153,8 @@ def _render_tier(family, px):
     return glyphs, line_h, base
 
 
-def generate_menu_font(font_path, out_root, scale_percent=100):
-    """Write mainfont.fnt + mainfont_0.png for the five size tiers into out_root (…/media/fonts/EN)."""
+def generate_menu_font(font_path, out_root, scale_percent=100, file_stem="MenuFont"):
+    """Write <file_stem>.fnt + <file_stem>_0.png for the five size tiers into out_root (…/media/fonts/<Prefix>)."""
     family = family_for(font_path)
     if not family:
         raise FontError(f"Could not read the font file: {font_path}")
@@ -174,9 +174,9 @@ def generate_menu_font(font_path, out_root, scale_percent=100):
         p.end()
         folder = out_root / tier if tier else out_root
         folder.mkdir(parents=True, exist_ok=True)
-        if not atlas.save(str(folder / f"{FONT_FILE}_0.png"), "PNG"):
+        if not atlas.save(str(folder / f"{file_stem}_0.png"), "PNG"):
             raise FontError(f"Could not write the font texture in {folder}")
-        (folder / f"{FONT_FILE}.fnt").write_text(
-            fnt_text(family, px, line_h, base, atlas_size, f"{FONT_FILE}_0.png", glyphs),
+        (folder / f"{file_stem}.fnt").write_text(
+            fnt_text(family, px, line_h, base, atlas_size, f"{file_stem}_0.png", glyphs),
             encoding="utf-8", newline="")
     return family

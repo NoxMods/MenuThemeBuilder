@@ -7,8 +7,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter
 
+from . import APP_VERSION
 from .model import (Theme, LAYOUTS, BUTTON_IDS, sanitize_stem, PROJECT_FILE, map_paths,
-                    parse_credits, final_credit_groups)
+                    parse_credits, final_credit_groups, stamp_text)
 
 
 class BuildError(Exception):
@@ -21,13 +22,13 @@ def validate(t: Theme):
     """Return (errors, warnings)."""
     errs, warns = [], []
     if not t.name.strip():
-        errs.append("The theme needs a name.")
+        errs.append("The Theme needs a name.")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", t.theme_id or ""):
         errs.append("Theme ID may only contain letters and digits (and must start with a letter).")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,9}", t.prefix or ""):
         errs.append("Prefix must be 2-10 letters/digits and start with a letter (e.g. MMT).")
     if not t.backgrounds and not t.clips:
-        errs.append("Add at least one background image or one video clip.")
+        errs.append("Add at least one background Image or one Video clip.")
 
     def need(path, what):
         if path and not Path(path).is_file():
@@ -51,10 +52,13 @@ def validate(t: Theme):
             errs.append(f"Video clip {i}: the sound must be .ogg.")
         if t.video_mode != "random" and c.length_ms <= 0:
             warns.append(f"Video clip {i}: '{t.video_mode}' mode needs the clip length (ms).")
-    need(t.font_file, "Font")
+    for i, f in enumerate(t.fonts, 1):
+        if not f.file:
+            errs.append(f"Font {i} has no file.")
+        need(f.file, f"Font {i}")
     for a, what in (("poster", "Poster"), ("icon", "Icon"), ("logo", "Logo"), ("logo_alt", "Alternative logo"),
                     ("options_icon", "Settings icon"), ("strip", "Strip art"), ("arrow_h", "Horizontal arrow"),
-                    ("arrow_v", "Vertical arrow"), ("caption", "Caption bar"), ("card_default", "Default card image")):
+                    ("arrow_v", "Vertical arrow"), ("caption", "Caption bar"), ("card_default", "Default card Image")):
         need(getattr(t, a), what)
     for k, p in t.cards.items():
         need(p, f"Card {k}")
@@ -65,10 +69,95 @@ def validate(t: Theme):
         s = r.size()
         if s.isValid() and (s.width() < 1920 or s.height() < 1080):
             warns.append(f"{Path(p).name} is {s.width()}x{s.height()}; 1920x1080 or larger is recommended.")
+    need_pct = 100 + (int(t.drift_px) * 5 + 47) // 48
+    if t.drift and int(t.drift_px) > 0 and t.backgrounds and image_scale(t) < need_pct:
+        warns.append(f"Drift moves the Image {int(t.drift_px)} px, so a strip of the screen can show at its edge. Set Image scale to at least {need_pct}%.")
     return errs, warns
 
 
 # ---------------------------------------------------------------- helpers ------------
+
+def image_scale(t):
+    return max(100, min(150, int(t.image_scale)))
+
+
+def picture_helper():
+    """drawCover cannot scale, so a scaled or zooming picture is cover-fitted here instead (through MTF's smooth drawing
+    when it has it, the same call drawCover ends in)."""
+    return ["local function drawPicture(ctx, img, offsetX, offsetY, zoom)",
+              "\tlocal tw, th = img:getWidth(), img:getHeight()",
+              "\tif tw <= 0 or th <= 0 then", "\t\treturn", "\tend",
+              "\tlocal k = math.max(ctx.width / tw, ctx.height / th) * zoom",
+              "\tlocal w, h = tw * k, th * k",
+              "\tlocal x, y = (ctx.width - w) / 2 + offsetX, (ctx.height - h) / 2 + offsetY",
+              "\tif ctx.draw and ctx.draw.smooth then", "\t\tctx.draw.smooth(img, x, y, w, h, 1, 1, 1, 1)", "\telse",
+              "\t\tctx.screen:drawTextureScaled(img, x, y, w, h, 1, 1, 1, 1)", "\tend",
+              "end", ""]
+
+
+def seamless_lines(P, picture, zoom_on):
+    """drawSeamless: the slide styles with the old picture leaving while the new one arrives, in one push, so no black shows
+    between them. The push is centred on the moment the cycle changes picture, so a cycle is as long as before."""
+    def draw(img, x, y, z):
+        return f"drawPicture(ctx, {img}, {x}, {y}, {z})" if picture else f"ctx.drawCover({img}, 1, {x}, {y})"
+
+    out = ["local function drawSeamless(ctx, style, count)",
+           f"\tlocal T = {P}_Config.TRANSITION_MS",
+           f"\tlocal cycleMs = T + {P}_Config.IMAGE_HOLD_MS + T",
+           "\tlocal s = ctx.now - run.startMs + T / 2",
+           "\tlocal k = math.floor(s / cycleMs)",
+           "\tlocal r = s - k * cycleMs",
+           "\tlocal w, h = ctx.width, ctx.height",
+           f"\tlocal drift = {P}_Config.IMAGE_DRIFT and {P}_Config.DRIFT_PX * ctx.layout.uiScale or 0"]
+    if picture:
+        out.append(f"\tlocal scale = {P}_Config.IMAGE_SCALE / 100")
+    out.append("\tlocal function pose(p)")
+    if picture and zoom_on:
+        out.append(f"\t\treturn -drift * p, scale * (1 + {P}_Config.IMAGE_ZOOM / 100 * (0.5 - 0.5 * math.cos(2 * math.pi * p)))")
+    elif picture:
+        out.append("\t\treturn -drift * p, scale")
+    else:
+        out.append("\t\treturn -drift * p")
+    out += ["\tend",
+            f"\tlocal cur = ctx.tex({P}_Config.BG_IMAGES[k % count + 1])",
+            "\tif not cur then", "\t\treturn", "\tend",
+            "\tif k > 0 and r < T then",
+            f"\t\tlocal prev = ctx.tex({P}_Config.BG_IMAGES[(k - 1) % count + 1])",
+            "\t\tif not prev then", "\t\t\treturn", "\t\tend",
+            "\t\tlocal t = r / T",
+            "\t\tlocal px, pz = pose(1)" if picture else "\t\tlocal px = pose(1)",
+            '\t\tif style == "slide" then',
+            "\t\t\t" + draw("prev", "px - w * t", "0", "pz"),
+            "\t\t\t" + draw("cur", "math.max(0, w + px - w * t)", "0", "scale"),
+            "\t\telse",
+            "\t\t\t" + draw("prev", "px", "h * t", "pz"),
+            "\t\t\t" + draw("cur", "px * (1 - t)", "-h * (1 - t)", "scale"),
+            "\t\tend",
+            "\telse",
+            f"\t\tlocal x, z = pose(math.min(1, math.max(0, (r - T) / (cycleMs - T))))" if picture
+            else "\t\tlocal x = pose(math.min(1, math.max(0, (r - T) / (cycleMs - T))))",
+            "\t\t" + draw("cur", "x", "0", "z"),
+            "\tend", "end", ""]
+    return out
+
+
+def picture_body(P, lines, zoom_on):
+    out = []
+    for line in lines:
+        if "ctx.drawCover(img, 1, driftX" in line:
+            line = line.replace("ctx.drawCover(img, 1, driftX", "drawPicture(ctx, img, driftX")[:-1] + ", zoom)"
+        elif "ctx.drawCover(img, 1, " in line:
+            line = line.replace("ctx.drawCover(img, 1, ", "drawPicture(ctx, img, ")[:-1] + ", scale)"
+        out.append(line)
+        if line.startswith("\tlocal driftX ="):
+            out.append(f"\tlocal scale = {P}_Config.IMAGE_SCALE / 100")
+            if zoom_on:
+                out.append(f"\tlocal progress = math.min(1, math.max(0, (into - {P}_Config.TRANSITION_MS) / {P}_Config.IMAGE_HOLD_MS))")
+                out.append(f"\tlocal zoom = scale * (1 + {P}_Config.IMAGE_ZOOM / 100 * (0.5 - 0.5 * math.cos(2 * math.pi * progress)))")
+            else:
+                out.append("\tlocal zoom = scale")
+    return out
+
 
 def lq(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "\\n") + '"'
@@ -82,7 +171,7 @@ def one_line(s):
 def _load_image(src):
     img = QImage(str(src))
     if img.isNull():
-        raise BuildError(f"Could not read the image: {src}")
+        raise BuildError(f"Could not read the Image: {src}")
     return img
 
 
@@ -94,6 +183,24 @@ def put_png(src, dest: Path):
     else:
         if not _load_image(src).save(str(dest), "PNG"):
             raise BuildError(f"Could not convert to PNG: {src}")
+
+
+# Needs Menu Theme Framework 1.0.3 (the field is unknown, and only logs a warning, on older versions). Set True at the MTF 1.0.3 release.
+EMIT_CAPTION_UNDER_BORDER = False
+
+
+def put_solid(dest: Path, w, h, color):
+    """A plain one-colour PNG (the white caption bar MTF tints when the theme brings no caption art of its own)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    img = QImage(w, h, QImage.Format_ARGB32)
+    img.fill(QColor(color))
+    if not img.save(str(dest), "PNG"):
+        raise BuildError(f"Could not write {dest.name}")
+
+
+def needs_caption_art(t):
+    """MTF multiplies a colour into the caption art, so a coloured bar or highlight needs art to colour."""
+    return not t.caption and (t.caption_tint_on or (t.list_highlight == "caption" and t.highlight_tint_on))
 
 
 def put_file(src, dest: Path):
@@ -123,6 +230,28 @@ def square_from(src, size, text):
     return out
 
 
+def font_label(f):
+    """The name shown in the Button Font choice: the font's own name, else the file name."""
+    return one_line(f.name) or Path(f.file).stem
+
+
+def font_plan(t):
+    """One entry per font with the names it gets in the mod: the theme prefix keeps a file from colliding with another
+    theme's font, and two fonts with the same name get a number."""
+    plan, stems, ids = [], set(), set()
+    for f in t.fonts:
+        label = font_label(f)
+        base = sanitize_stem(label)
+        stem, fid, k = f"{t.prefix}_{base}", base.lower(), 2
+        while stem.lower() in stems or fid in ids:
+            stem, fid = f"{t.prefix}_{base}_{k}", f"{base.lower()}_{k}"
+            k += 1
+        stems.add(stem.lower())
+        ids.add(fid)
+        plan.append({"font": f, "label": label, "stem": stem, "id": fid, "key": f"IGUI_{t.prefix}_Font{len(plan) + 1}"})
+    return plan
+
+
 def logo_display_height(t):
     """Logo height in pixels (at 1080p) when the theme scales its logo, else 0 (= the image's own height)."""
     if not t.logo or int(t.logo_scale) == 100:
@@ -147,6 +276,10 @@ def gen_config(t, a):
     L.append(f"{P}_Config.TRANSITION_MS = {trans_ms}")
     L.append(f"{P}_Config.IMAGE_DRIFT = {'true' if t.drift else 'false'}")
     L.append(f"{P}_Config.DRIFT_PX = {int(t.drift_px)}")
+    if t.zoom:
+        L.append(f"{P}_Config.IMAGE_ZOOM = {max(1, min(50, int(t.zoom_pct)))}")
+    if t.zoom or image_scale(t) != 100:
+        L.append(f"{P}_Config.IMAGE_SCALE = {image_scale(t)}")
     if a["card_default"]:
         L.append(f"{P}_Config.CARD_DEFAULT_PHOTO = {lq(a['card_default'])}")
     if a["logo_alt"]:
@@ -173,6 +306,9 @@ def gen_config(t, a):
 def _credit_lua(groups, indent="\t\t"):
     out = []
     for g in groups:
+        if not g["rows"]:
+            out.append(f"{indent}{{ header = {lq(g['header'])} }},")
+            continue
         rows = ", ".join(lq(r) for r in g["rows"])
         out.append(f"{indent}{{ header = {lq(g['header'])}, rows = {{ {rows} }} }},")
     return out
@@ -198,19 +334,41 @@ def gen_theme(t, a):
         L += [f"local function {P}_LogoPath(ctx)",
               f'\tif ctx.settings.get("LogoVariant") == "alt" and getTexture({P}_Config.LOGO_ALT) then',
               f"\t\treturn {P}_Config.LOGO_ALT", "\tend", "\treturn nil", "end", ""]
-    if t.logo_place == "custom":
-        L += [f"local function {P}_LogoPlace(ctx, w, h, uiScale)",
-              f"\treturn ctx.layout.originX + {int(t.logo_x)} * uiScale, ctx.layout.originY + {int(t.logo_y)} * uiScale",
-              "end", ""]
+    stacked = "left" in t.layouts
+    if stacked:
+        L += [f"local function {P}_LeftCentreY(ctx)", "\treturn ctx.height / 2", "end", "",
+              f"local function {P}_LeftX(ctx)",
+              "\tlocal icon = MenuThemeFramework.optionsButtonRect and MenuThemeFramework.optionsButtonRect()",
+              "\tif icon then", "\t\tlocal theme = MenuThemeFramework.theme",
+              '\t\tlocal pad = theme and type(theme.menu) == "table" and theme.menu.listHighlightPad',
+              '\t\treturn icon.x + (type(pad) == "number" and pad or 6)', "\tend", "\treturn nil", "end", ""]
+    if t.logo_place == "custom" or stacked:
+        L.append(f"local function {P}_LogoPlace(ctx, w, h, uiScale)")
+        if stacked:
+            L += ['\tif ctx.menu.layoutId() == "left" then',
+                  "\t\treturn ctx.layout.originX + ctx.layout.refW - 50 * uiScale - w, ctx.layout.originY + 50 * uiScale",
+                  "\tend"]
+        if t.logo_place == "custom":
+            L.append(f"\treturn ctx.layout.originX + {int(t.logo_x)} * uiScale, ctx.layout.originY + {int(t.logo_y)} * uiScale")
+        else:
+            L.append("\treturn nil")
+        L += ["end", ""]
 
     L += ["local run = nil", "",
           "local function startRun(ctx)", "\trun = { screen = ctx.screen, startMs = ctx.now }", "end", ""]
 
     if has_img:
-        L += [
+        picture = bool(t.zoom or image_scale(t) != 100)
+        seamless = bool(t.seamless_slide) and not static
+        draw_lines = [
             "local function drawImages(ctx)",
             f"\tlocal count = #{P}_Config.BG_IMAGES",
             "\tif count == 0 then", "\t\treturn", "\tend",
+            *([
+                '\tlocal transition = ctx.settings.get("Transition")',
+                '\tif count > 1 and (transition == "slide" or transition == "slidedown") then',
+                "\t\tdrawSeamless(ctx, transition, count)", "\t\treturn", "\tend",
+            ] if seamless else []),
             f"\tlocal cycleMs = {P}_Config.TRANSITION_MS + {P}_Config.IMAGE_HOLD_MS + {P}_Config.TRANSITION_MS",
             "\tlocal elapsed = ctx.now - run.startMs",
             "\tlocal index = math.floor(elapsed / cycleMs) % count + 1",
@@ -240,6 +398,11 @@ def gen_theme(t, a):
             "\t\telse", "\t\t\tctx.drawCover(img, 1, driftX, 0)",
             "\t\t\tctx.screen:drawRect(0, 0, w, h, t, 0, 0, 0)", "\t\tend",
             "\tend", "end", ""]
+        if picture:
+            L += picture_helper()
+        if seamless:
+            L += seamless_lines(P, picture, t.zoom)
+        L += picture_body(P, draw_lines, t.zoom) if picture else draw_lines
 
     L += [f"local function {P}_renderBackground(ctx)",
           "\tif not run or run.screen ~= ctx.screen then", "\t\tstartRun(ctx)", "\tend",
@@ -263,8 +426,11 @@ def gen_theme(t, a):
     groups = final_credit_groups(t)
     if groups:
         L += ["\tcredits = {"] + _credit_lua(groups) + ["\t},"]
+    footer = []
     if t.about.strip():
-        L += ["\tcreditsFooter = {"] + _credit_lua([{"header": "About this Mod:", "rows": [t.about.strip()]}]) + ["\t},"]
+        footer.append({"header": "About this Mod:", "rows": [t.about.strip()]})
+    footer.append({"header": stamp_text(), "rows": []})
+    L += ["\tcreditsFooter = {"] + _credit_lua(footer) + ["\t},"]
 
     if t.layouts:
         default = t.default_layout if t.default_layout in t.layouts else t.layouts[0]
@@ -272,7 +438,9 @@ def gen_theme(t, a):
         for lid in t.layouts:
             suffix = LAYOUTS[lid][1]
             base = f'\t\t{{ id = "{lid}", name = "IGUI_{P}_{suffix}", '
-            extra = {"rail": 'preset = "keep"', "strip": 'preset = "strip"',
+            extra = {"rail": 'preset = "keep"',
+                     "left": f'preset = "keep", alignY = {P}_LeftCentreY, alignX = {P}_LeftX',
+                     "strip": 'preset = "strip"',
                      "carousel": 'preset = "carousel", carouselAlign = "centre"',
                      "cards_wide": 'preset = "cards", cardWidth = 1228',
                      "cards_vertical": 'preset = "cards", cardOrientation = "vertical"'}[lid]
@@ -299,7 +467,7 @@ def gen_theme(t, a):
 
     logo = ["\tlogo = {", "\t\tslide = 0.35," if t.logo_slide else "\t\tslide = 0,"]
     n = 0
-    if t.logo_place == "custom":
+    if t.logo_place == "custom" or stacked:
         logo.append(f"\t\tplace = {P}_LogoPlace,"); n += 1
     if a["logo_alt"]:
         logo.append(f"\t\tpath = {P}_LogoPath,"); n += 1
@@ -319,18 +487,36 @@ def gen_theme(t, a):
     menu = []
     if t.list_highlight in ("white", "caption"):
         menu.append(f'\t\tlistHighlight = "{t.list_highlight}",')
-    if t.font_file:
-        menu += ['\t\tbuttonFont = "MainMenu1",', '\t\tbuttonFontCheck = "media/fonts/EN/mainfont_0.png",']
+    if t.list_highlight == "caption" and t.highlight_tint_on:
+        hc = QColor(t.highlight_tint)
+        menu.append(f"\t\tlistHighlightTint = {{ r = {hc.redF():.3f}, g = {hc.greenF():.3f}, b = {hc.blueF():.3f} }},")
+    if t.fonts:
+        menu.append("\t\tfonts = {")
+        for fp in font_plan(t):
+            fnt = f"media/fonts/{P}/{fp['stem']}.fnt"
+            menu.append(f'\t\t\t{{ id = {lq(fp["id"])}, name = "{fp["key"]}", fnt = {lq(fnt)} }},')
+        menu.append("\t\t},")
     if menu:
         L += ["", "\tmenu = {"] + menu + ["\t},"]
 
+    if has_img:
+        L += ["", "\tloadCover = {", "\t\tready = function(ctx)",
+              f"\t\t\treturn MenuThemeFramework.texturesReady({P}_Config.BG_IMAGES)", "\t\tend,",
+              "\t\tfadeMs = 500,", "\t\tmaxHoldMs = 10000,", "\t},"]
+    if static:
+        L += ["", "\ttransitionSpeed = false,"]
+
     if a["card_default"]:
         L += ["", "\tcardPhoto = function(buttonId)", f"\t\treturn {P}_Config.CARD_DEFAULT_PHOTO", "\tend,"]
-    if t.caption_tint_on:
-        c = QColor(t.caption_tint)
-        L += ["", "\tcards = {", "\t\tlook = {",
-              f"\t\t\tcaptionTint = {{ r = {c.redF():.3f}, g = {c.greenF():.3f}, b = {c.blueF():.3f} }},",
-              "\t\t},", "\t},"]
+    if t.caption or t.caption_tint_on or needs_caption_art(t):
+        look = []
+        if t.caption_tint_on or needs_caption_art(t):
+            c = QColor(t.caption_tint) if t.caption_tint_on else QColor("black")
+            look.append(f"\t\t\tcaptionTint = {{ r = {c.redF():.3f}, g = {c.greenF():.3f}, b = {c.blueF():.3f} }},")
+        if EMIT_CAPTION_UNDER_BORDER:
+            look.append("\t\t\tcaptionUnderBorder = true,")
+        if look:
+            L += ["", "\tcards = {", "\t\tlook = {"] + look + ["\t\t},", "\t},"]
 
     if t.buttons_instant:
         L += ["", "\treveal = { fadeMs = 0, slide = \"none\" },"]
@@ -370,6 +556,8 @@ def gen_translation(t):
          f"IGUI_{P}_LogoStandard": "Standard", f"IGUI_{P}_LogoAlt": "Alternative"}
     for lid in t.layouts:
         d[f"IGUI_{P}_{LAYOUTS[lid][1]}"] = LAYOUTS[lid][2]
+    for fp in font_plan(t):
+        d[fp["key"]] = fp["label"]
     return json.dumps(d, indent="\t", ensure_ascii=False) + "\n"
 
 
@@ -432,6 +620,8 @@ def build(theme: Theme, workshop_dir, allow_foreign_overwrite=False):
         conv("arrow_h", f"media/ui/layout/{P}_Arrow_H.png")
         conv("arrow_v", f"media/ui/layout/{P}_Arrow_V.png")
         conv("caption", f"media/ui/cards/captions/{P}_Caption.png")
+        if needs_caption_art(t):
+            put_solid(m42 / f"media/ui/cards/captions/{P}_Caption.png", 256, 64, "#ffffff")
         a["card_default"] = conv("card_default", f"media/ui/cards/backgrounds/{P}_Card_Default.png")
         for bid in BUTTON_IDS:
             src = t.cards.get(bid)
@@ -442,22 +632,34 @@ def build(theme: Theme, workshop_dir, allow_foreign_overwrite=False):
 
         # menu button font: the .ttf is turned into the game's bitmap font (5 sizes); the .ttf itself stays in the
         # project folder (not in the mod) so the theme can be edited again
-        if t.font_file:
+        if t.fonts:
             from . import fontgen
-            try:
-                fontgen.generate_menu_font(t.font_file, media / "fonts" / "EN", t.font_scale)
-            except fontgen.FontError as e:
-                raise BuildError(str(e))
             src_dir = staging / "FontSource"
-            fname = Path(t.font_file).name
-            put_file(t.font_file, src_dir / fname)
-            out.font_file = str(target_root / "FontSource" / fname)
-            if t.font_license and Path(t.font_license).is_file():
-                put_file(t.font_license, media / "fonts" / "EN" / f"OFL-{sanitize_stem(Path(fname).stem)}.txt")
-                put_file(t.font_license, src_dir / Path(t.font_license).name)
-                out.font_license = str(target_root / "FontSource" / Path(t.font_license).name)
-            else:
-                out.font_license = ""
+            kept = set()
+
+            def keep(name):
+                n, k = name, 2
+                while n.lower() in kept:
+                    n = f"{Path(name).stem}_{k}{Path(name).suffix}"
+                    k += 1
+                kept.add(n.lower())
+                return n
+            for i, fp in enumerate(font_plan(t)):
+                f = fp["font"]
+                try:
+                    fontgen.generate_menu_font(f.file, media / "fonts" / P, f.scale, fp["stem"])
+                except fontgen.FontError as e:
+                    raise BuildError(str(e))
+                fname = keep(Path(f.file).name)
+                put_file(f.file, src_dir / fname)
+                out.fonts[i].file = str(target_root / "FontSource" / fname)
+                if f.license and Path(f.license).is_file():
+                    put_file(f.license, media / "fonts" / P / f"OFL-{sanitize_stem(Path(fname).stem)}.txt")
+                    lname = keep(Path(f.license).name)
+                    put_file(f.license, src_dir / lname)
+                    out.fonts[i].license = str(target_root / "FontSource" / lname)
+                else:
+                    out.fonts[i].license = ""
 
         # music
         used = set()
@@ -568,4 +770,6 @@ def _save_project_for(theme, staging: Path, final_root: Path):
             return Path(p).resolve().relative_to(final_root.resolve()).as_posix()
         except ValueError:
             return str(p)
-    (staging / PROJECT_FILE).write_text(_json.dumps(asdict(map_paths(theme, rel)), indent=2), encoding="utf-8")
+    data = asdict(map_paths(theme, rel))
+    data["builder_version"] = APP_VERSION
+    (staging / PROJECT_FILE).write_text(_json.dumps(data, indent=2), encoding="utf-8")

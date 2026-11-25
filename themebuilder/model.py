@@ -4,12 +4,15 @@ import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from . import APP_VERSION
+
 PROJECT_FILE = "ThemeProject.json"
 BUTTON_IDS = ["LATESTSAVE", "SOLO", "COOP", "MULTIPLAYER", "OPTIONS", "MODS",
               "WORKSHOP", "TUTORIAL", "CREDITS", "EXIT", "LOAD"]
 # id -> (display name, translation suffix)
 LAYOUTS = {
     "rail": ("Zomboid (vanilla list)", "LayoutRail", "Zomboid"),
+    "left": ("Stacked", "LayoutLeft", "Stacked"),
     "strip": ("Strip", "LayoutStrip", "Strip"),
     "carousel": ("Carousel", "LayoutCarousel", "Carousel"),
     "cards_wide": ("Horizontal Cards", "LayoutCardsWide", "Horizontal Cards"),
@@ -39,6 +42,14 @@ class Clip:
 
 
 @dataclass
+class Font:
+    file: str = ""                    # .ttf/.otf converted to the game's bitmap font format when building
+    name: str = ""                    # shown in the Button Font choice (empty = the file name)
+    scale: int = 100                  # % - every font is drawn at a different visual size
+    license: str = ""                 # licence text file shipped next to the font (optional)
+
+
+@dataclass
 class Theme:
     # identity
     name: str = "My Menu Theme"
@@ -46,7 +57,7 @@ class Theme:
     prefix: str = "MMT"
     auto_ids: bool = True
     author: str = ""
-    description: str = "A main menu theme for Menu Theme Framework."
+    description: str = "A main menu Theme for Menu Theme Framework."
     mod_version: str = "1.0.0"
     version_min: str = "42.19.0"
     poster: str = ""
@@ -59,6 +70,10 @@ class Theme:
     no_transition: bool = False       # True = images change instantly, no animation
     drift: bool = False
     drift_px: int = 30
+    zoom: bool = False                # the picture slowly zooms in and back out while it is shown
+    zoom_pct: int = 8                 # how far it zooms, in percent
+    image_scale: int = 100            # the pictures are drawn this many percent of the screen fit (100 to 150), cropped
+    seamless_slide: bool = True       # slide styles: the old picture leaves while the new one arrives (no black between)
     # logo / layout
     logo: str = ""
     logo_alt: str = ""
@@ -69,7 +84,7 @@ class Theme:
     logo_x: int = 60
     logo_y: int = 40
     options_icon: str = ""
-    layouts: list = field(default_factory=lambda: ["rail", "strip", "carousel", "cards_wide", "cards_vertical"])
+    layouts: list = field(default_factory=lambda: ["rail", "left", "strip", "carousel", "cards_wide", "cards_vertical"])
     default_layout: str = "cards_wide"
     strip: str = ""
     arrow_h: str = ""
@@ -79,13 +94,12 @@ class Theme:
     caption: str = ""
     caption_tint_on: bool = False
     caption_tint: str = "#000000"
+    highlight_tint_on: bool = False   # colour of the hover highlight (only with list_highlight = caption)
+    highlight_tint: str = "#ffffff"
     card_default: str = ""
     cards: dict = field(default_factory=dict)
-    # menu button font
-    font_file: str = ""               # .ttf/.otf converted to the game's bitmap font format when building
-    font_name: str = ""
-    font_scale: int = 100             # % - every font is drawn at a different visual size
-    font_license: str = ""            # licence text file shipped next to the font (optional)
+    # menu button fonts (the first one is used until the player picks another in Menu Theme Settings)
+    fonts: list = field(default_factory=list)
     # audio
     tracks: list = field(default_factory=list)
     repeat_one: bool = False
@@ -98,12 +112,55 @@ class Theme:
     clips: list = field(default_factory=list)
     # texts
     credits_text: str = ""            # manual credits, "# Role" lines followed by their rows
-    auto_credits: bool = True         # add author + music titles automatically
+    auto_credits: bool = True         # add the author's name automatically
+    auto_music: bool = False          # add the track titles under Music automatically
+    auto_fonts: bool = False          # add the font names under Fonts automatically
     about: str = ""
 
     @property
     def mod_id(self):
         return self.theme_id + "B42"
+
+    # the first font, for the single-font editor of the desktop tool (a project may carry several)
+    @property
+    def font_file(self):
+        return self.fonts[0].file if self.fonts else ""
+
+    @font_file.setter
+    def font_file(self, value):
+        if value:
+            if not self.fonts:
+                self.fonts.append(Font())
+            self.fonts[0].file = value
+        elif self.fonts:
+            self.fonts.pop(0)
+
+    @property
+    def font_name(self):
+        return self.fonts[0].name if self.fonts else ""
+
+    @font_name.setter
+    def font_name(self, value):
+        if self.fonts:
+            self.fonts[0].name = value
+
+    @property
+    def font_scale(self):
+        return self.fonts[0].scale if self.fonts else 100
+
+    @font_scale.setter
+    def font_scale(self, value):
+        if self.fonts:
+            self.fonts[0].scale = value
+
+    @property
+    def font_license(self):
+        return self.fonts[0].license if self.fonts else ""
+
+    @font_license.setter
+    def font_license(self, value):
+        if self.fonts:
+            self.fonts[0].license = value
 
 
 def slug(text, default="Theme"):
@@ -150,6 +207,9 @@ def parse_credits(text):
     return [g for g in groups if g["header"] or g["rows"]]
 
 
+BUILDER_CREDIT = "JFlowersB & ObnoxiouslyNoxious"
+
+
 def credit_header(text):
     """'music', 'Music:' -> 'music:'  (the game shows the header exactly as written)."""
     h = (text or "").strip().rstrip(":").strip()
@@ -173,10 +233,28 @@ def final_credit_groups(t):
 
     if t.auto_credits:
         add("Theme", [t.author])
+    if t.auto_music:
         add("Music", [tr.title or Path(tr.path).stem for tr in t.tracks])
-        add("Fonts", [t.font_name] if t.font_file else [])
+    if t.auto_fonts:
+        add("Fonts", [f.name for f in t.fonts if f.file])
     for g in parse_credits(t.credits_text):
         add(g["header"], g["rows"])
+    add("Menu Theme Builder", [BUILDER_CREDIT])
+    return groups
+
+
+def stamp_text():
+    return f"Built with Menu Theme Builder (Version {APP_VERSION})"
+
+
+def credit_screen_groups(t):
+    """Everything the Credits tab will show in the game, top to bottom: the Theme's credits (ending with the
+    Builder's), Menu Theme Framework's own line, then the About text and the stamp."""
+    groups = final_credit_groups(t)
+    groups.append({"header": "Menu Theme Framework:", "rows": ["ObnoxiouslyNoxious"]})
+    if t.about.strip():
+        groups.append({"header": "About this Mod:", "rows": [t.about.strip()]})
+    groups.append({"header": stamp_text(), "rows": []})
     return groups
 
 
@@ -186,9 +264,12 @@ def map_paths(theme, fn):
     """Return a deep copy of theme with fn applied to every asset path."""
     t = copy.deepcopy(theme)
     for a in ("poster", "icon", "logo", "logo_alt", "options_icon", "strip",
-              "arrow_h", "arrow_v", "caption", "card_default", "font_file", "font_license"):
+              "arrow_h", "arrow_v", "caption", "card_default"):
         v = getattr(t, a)
         setattr(t, a, fn(v) if v else "")
+    for f in t.fonts:
+        f.file = fn(f.file) if f.file else ""
+        f.license = fn(f.license) if f.license else ""
     t.backgrounds = [fn(p) for p in t.backgrounds]
     t.cards = {k: fn(v) for k, v in t.cards.items() if v}
     for tr in t.tracks:
@@ -209,6 +290,7 @@ def save_project(theme, root: Path):
         except ValueError:
             return str(p)
     data = asdict(map_paths(theme, rel))
+    data["builder_version"] = APP_VERSION
     (root / PROJECT_FILE).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -245,8 +327,12 @@ def load_project(root: Path):
         raise ValueError(f"{PROJECT_FILE} is not a valid project file.")
     tracks = [_build(Track, x) for x in _dicts(data.pop("tracks", []))]
     clips = [_build(Clip, x) for x in _dicts(data.pop("clips", []))]
+    fonts = [_build(Font, x) for x in _dicts(data.pop("fonts", []))]
+    if not fonts and isinstance(data.get("font_file"), str) and data["font_file"]:     # a project from before several fonts
+        fonts = [Font(file=data["font_file"], name=_coerce(data.get("font_name"), ""),
+                      scale=_coerce(data.get("font_scale"), 100), license=_coerce(data.get("font_license"), ""))]
     t = _build(Theme, data)
-    t.tracks, t.clips = tracks, clips
+    t.tracks, t.clips, t.fonts = tracks, clips, fonts
     t.backgrounds = [p for p in t.backgrounds if isinstance(p, str)]
     t.layouts = [i for i in t.layouts if i in LAYOUTS]
     t.cards = {k: v for k, v in t.cards.items() if k in BUTTON_IDS and isinstance(v, str)}

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QColorDialog, QComb
 from ..mediainfo import read_ogg_info, read_bik_info
 from ..fontgen import family_for
 from ..model import (Track, Clip, LAYOUTS, TRANSITIONS, BUTTON_IDS, slug, auto_prefix, parse_credits,
-                     final_credit_groups)
+                     final_credit_groups, credit_screen_groups)
 from .fonts_dialog import FontBrowser
 from .preview import HighlightGallery, CaptionSample, natural_size
 from .widgets import (ImagePicker, FilePicker, IMG_FILTER, make_thumb, note, labeled, CollapsibleSection, InkLabel)
@@ -240,21 +240,33 @@ class BackgroundsTab(BaseTab):
         self.style = QComboBox()
         for k, v in TRANSITIONS:
             self.style.addItem(v, k)
+        self.seamless = QCheckBox("Seamless Background Slides (the slide styles push the old Image out as the new one arrives, with no black between)")
         self.drift = QCheckBox("Slowly drift sideways while an image is shown")
         self.drift_px = spin(0, 500, 5, " px")
+        self.zoom = QCheckBox("Slowly zoom in and out while an Image is shown")
+        self.zoom_pct = spin(1, 50, 1, " %")
+        self.image_scale = spin(100, 150, 1, " %")
         form.addRow("Time each image stays", self.hold)
         form.addRow(self.instant)
         form.addRow("Animation time", labeled(self.trans, "How long the old image takes to leave, and the new one to arrive."))
         form.addRow("Animation style", labeled(self.style, "Players can still change the style in the theme's settings window."))
+        form.addRow(self.seamless)
         form.addRow(self.drift)
         form.addRow("Drift distance", labeled(self.drift_px, "In pixels, at 1080p."))
+        form.addRow(self.zoom)
+        form.addRow("Zoom amount", labeled(self.zoom_pct, "How much bigger the Image gets at the middle of its time on screen."))
+        form.addRow("Image scale", labeled(self.image_scale, "Draws every Image this much bigger than the screen and crops it, which gives Drift, Zoom and the slide room to move without showing an edge. 100% fits the screen exactly."))
         lay.addWidget(box)
         self.list.filesDropped.connect(self._add_files)
         self.hold.valueChanged.connect(lambda v: self._set("hold_ms", v))
         self.trans.valueChanged.connect(lambda v: self._set("transition_ms", v))
         self.style.currentIndexChanged.connect(lambda: self._set("transition_style", self.style.currentData()))
+        self.seamless.toggled.connect(lambda v: self._set("seamless_slide", v))
         self.drift.toggled.connect(lambda v: (self._set("drift", v), self._sync()))
         self.drift_px.valueChanged.connect(lambda v: self._set("drift_px", v))
+        self.zoom.toggled.connect(lambda v: (self._set("zoom", v), self._sync()))
+        self.zoom_pct.valueChanged.connect(lambda v: self._set("zoom_pct", v))
+        self.image_scale.valueChanged.connect(lambda v: self._set("image_scale", v))
         self.instant.toggled.connect(lambda v: (self._set("no_transition", v), self._sync()))
 
     def _sync(self):
@@ -262,6 +274,7 @@ class BackgroundsTab(BaseTab):
         self.trans.setEnabled(not inst)
         self.style.setEnabled(not inst)
         self.drift_px.setEnabled(self.drift.isChecked())
+        self.zoom_pct.setEnabled(self.zoom.isChecked())
 
     def _set(self, a, v):
         if self.t is None or self._loading:
@@ -290,8 +303,12 @@ class BackgroundsTab(BaseTab):
         self.hold.setValue(t.hold_ms)
         self.trans.setValue(t.transition_ms)
         self.style.setCurrentIndex(max(0, self.style.findData(t.transition_style)))
+        self.seamless.setChecked(t.seamless_slide)
         self.drift.setChecked(t.drift)
         self.drift_px.setValue(t.drift_px)
+        self.zoom.setChecked(t.zoom)
+        self.zoom_pct.setValue(t.zoom_pct)
+        self.image_scale.setValue(t.image_scale)
         self.instant.setChecked(t.no_transition)
         self._sync()
         self._refresh()
@@ -728,7 +745,15 @@ class LayoutTab(BaseTab):
                           "Click the look you want."))
         self.hl = HighlightGallery()
         hv.addWidget(self.hl)
-        hv.addWidget(note("\"Caption bar\" uses the caption art from the Cards tab."))
+        hrow = QHBoxLayout()
+        self.hl_tint_on = QCheckBox("Colour the highlight")
+        self.hl_tint_btn = QPushButton()
+        hrow.addWidget(self.hl_tint_on)
+        hrow.addWidget(self.hl_tint_btn)
+        hrow.addStretch(1)
+        hv.addLayout(hrow)
+        hv.addWidget(note("\"Caption bar\" uses the caption art from the Cards tab. To change its colour, turn on "
+                          "\"Colour the highlight\". With no caption art, the tool makes a plain bar for you."))
         lay.addWidget(hbox)
 
         # --- optional art
@@ -760,12 +785,34 @@ class LayoutTab(BaseTab):
         self.center_x.clicked.connect(lambda: self._centre(False))
         self.center_all.clicked.connect(lambda: self._centre(True))
         self.hl.chosen.connect(self._highlight)
+        self.hl_tint_on.toggled.connect(lambda v: (self._set("highlight_tint_on", v), self._hl_states()))
+        self.hl_tint_btn.clicked.connect(self._pick_hl_color)
 
     def _set(self, a, v):
         if self.t is None or self._loading:
             return
         setattr(self.t, a, v)
         self.touch()
+
+    def _hl_states(self):
+        t = self.t
+        if t is None:
+            return
+        caption = t.list_highlight == "caption"
+        self.hl_tint_on.setEnabled(caption)
+        self.hl_tint_btn.setEnabled(caption and t.highlight_tint_on)
+        self.hl_tint_btn.setText(t.highlight_tint)
+        c = QColor(t.highlight_tint)
+        fg = "#000" if c.lightness() > 140 else "#fff"
+        self.hl_tint_btn.setStyleSheet(f"background:{t.highlight_tint}; color:{fg}; border:1px solid #888;")
+        self.hl.update()
+
+    def _pick_hl_color(self):
+        c = QColorDialog.getColor(QColor(self.t.highlight_tint), self, "Highlight colour")
+        if c.isValid():
+            self.t.highlight_tint = c.name()
+            self._hl_states()
+            self.touch()
 
     def _sync(self):
         t = self.t
@@ -782,7 +829,7 @@ class LayoutTab(BaseTab):
         if self.t is None:
             return
         self.t.list_highlight = mode
-        self.hl.update()
+        self._hl_states()
         self.touch()
 
     def _centre(self, both):
@@ -830,6 +877,8 @@ class LayoutTab(BaseTab):
         self.ah.set_path(t.arrow_h)
         self.av.set_path(t.arrow_v)
         self.hl.set_theme(t)
+        self.hl_tint_on.setChecked(t.highlight_tint_on)
+        self._hl_states()
         self._sync()
 
     def _fill_default(self):
@@ -879,7 +928,7 @@ class CardsTab(BaseTab):
 
         cbox = QGroupBox("Name bar of the cards")
         cv = QVBoxLayout(cbox)
-        self.caption = ImagePicker("Name bar art (optional)", "1024x128, white art. Without it MTF draws its own bar.", (1024, 128), (128, 16))
+        self.caption = ImagePicker("Name bar art (optional)", "1024x128, white art. Without it the bar is plain black, or your colour when 'Colour the bar' is on.", (1024, 128), (128, 16))
         cv.addWidget(self.caption)
         row = QHBoxLayout()
         self.tint_on = QCheckBox("Colour the bar")
@@ -967,7 +1016,8 @@ class FontTab(BaseTab):
         lay.setSpacing(12)
         lay.addWidget(note("Give the main-menu buttons your own font. Pick a free font from Google Fonts (previewed here) "
                            "or use a .ttf / .otf from your computer. The tool converts it into the format the game "
-                           "needs (5 sizes) when you press Save && Build."))
+                           "needs (5 sizes) when you press Save && Build. A project made with the web builder can carry several fonts; "
+                           "this tool edits the first one and keeps the others."))
         box = QGroupBox("Menu button font")
         v = QVBoxLayout(box)
         self.name_lbl = QLabel()
@@ -988,10 +1038,10 @@ class FontTab(BaseTab):
                                                            "Change this until it fits your menu (see the preview)."))
         v.addLayout(form)
         lay.addWidget(box)
-        lay.addWidget(note("Good to know: the game can only REPLACE its own menu font, it cannot add new ones. So this font "
-                           "replaces the menu button font while your theme is enabled (use only one menu theme at a "
-                           "time). It covers Latin letters; languages such as Russian, Chinese, Japanese or Korean keep "
-                           "the game's font. Check that the font's licence lets you publish it - fonts from Google Fonts do."))
+        lay.addWidget(note("Good to know: the font is added to the Button Font choice in Menu Theme Settings, so players can "
+                           "also use it in other menu themes. It covers Latin letters; languages such as Russian, Chinese, "
+                           "Japanese or Korean keep the game's font. Check that the font's licence lets you publish it - "
+                           "fonts from Google Fonts do."))
         lay.addStretch(1)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1065,7 +1115,7 @@ class CreditsTab(BaseTab):
         lay.setSpacing(10)
         lay.addWidget(note("Credits are shown in the theme's Settings window. Each line has a role (Music, Fonts...) "
                            "and a name; lines with the same role are grouped for you - no # needed."))
-        self.auto = QCheckBox("Add my author name and my music titles automatically")
+        self.auto = QCheckBox("Add my author name automatically")
         lay.addWidget(self.auto)
 
         self.table = QTableWidget(0, 2)
@@ -1100,6 +1150,11 @@ class CreditsTab(BaseTab):
         row.addStretch(1)
         lay.addLayout(row)
 
+        self.auto_music = QCheckBox("Auto generate for Music (the titles of my tracks)")
+        self.auto_fonts = QCheckBox("Auto generate for Fonts (the names of my fonts)")
+        lay.addWidget(self.auto_music)
+        lay.addWidget(self.auto_fonts)
+
         lay.addWidget(QLabel("<b>How it will look in the game</b>"))
         self.result = QPlainTextEdit()
         self.result.setReadOnly(True)
@@ -1117,6 +1172,8 @@ class CreditsTab(BaseTab):
         outer.addWidget(scrolled(body))
 
         self.auto.toggled.connect(self._auto)
+        self.auto_music.toggled.connect(lambda v: self._auto_flag("auto_music", v))
+        self.auto_fonts.toggled.connect(lambda v: self._auto_flag("auto_fonts", v))
         self.table.itemChanged.connect(lambda _: self._commit())
         self.about.textChanged.connect(lambda: self._plain("about", self.about.toPlainText()))
 
@@ -1132,6 +1189,26 @@ class CreditsTab(BaseTab):
         self.t.auto_credits = v
         self._update_result()
         self.touch()
+
+    def _auto_flag(self, name, v):
+        if self.t is None or self._loading:
+            return
+        setattr(self.t, name, v)
+        self._update_result()
+        self._show_autos()
+        self.touch()
+
+    def _has_role(self, name):
+        for role, _ in self._table_rows():
+            if role.strip().rstrip(":").strip().lower() == name:
+                return True
+        return False
+
+    def _show_autos(self):
+        if self.t is None:
+            return
+        self.auto_music.setVisible(self._has_role("music") or bool(self.t.auto_music))
+        self.auto_fonts.setVisible(self._has_role("fonts") or bool(self.t.auto_fonts))
 
     # table <-> text
     def _rows_from_text(self):
@@ -1183,6 +1260,7 @@ class CreditsTab(BaseTab):
             lines.extend(items)
         self.t.credits_text = "\n".join(lines)
         self._update_result()
+        self._show_autos()
         self.touch()
 
     def _add(self, role):
@@ -1194,6 +1272,7 @@ class CreditsTab(BaseTab):
         self._loading = False
         self.table.setCurrentCell(r, 1 if role else 0)
         self.table.editItem(self.table.item(r, 1 if role else 0))
+        self._show_autos()
 
     def _remove(self):
         r = self.table.currentRow()
@@ -1215,7 +1294,7 @@ class CreditsTab(BaseTab):
         if self.t is None:
             return
         lines = []
-        for g in final_credit_groups(self.t):
+        for g in credit_screen_groups(self.t):
             if g["header"]:
                 lines.append(g["header"])
             lines.extend("    " + r for r in g["rows"])
@@ -1224,8 +1303,14 @@ class CreditsTab(BaseTab):
 
     def _fill(self):
         t = self.t
+        was = self._loading
+        self._loading = True
         self.auto.setChecked(t.auto_credits)
+        self.auto_music.setChecked(t.auto_music)
+        self.auto_fonts.setChecked(t.auto_fonts)
+        self._loading = was
         self._fill_table(self._rows_from_text())
+        self._show_autos()
         self.about.setPlainText(t.about)
         self._update_result()
 
