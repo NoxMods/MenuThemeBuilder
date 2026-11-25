@@ -100,7 +100,12 @@ def draw_list_highlight(p, box, t, mode):
     if mode == "caption":
         art = load_pm(t.caption, 1024)
         if art is not None:
-            p.drawPixmap(box, art, QRectF(art.rect()))   # MTF default listHighlightTint is plain art
+            if t.highlight_tint_on:
+                art = tinted(art, QColor(t.highlight_tint), t.caption + "|highlight")
+            p.drawPixmap(box, art, QRectF(art.rect()))   # without a colour MTF draws the art as it is
+            return QColor("white")
+        if t.highlight_tint_on:
+            p.fillRect(box, QColor(t.highlight_tint))    # the builder makes a plain white bar for MTF to tint
             return QColor("white")
     p.fillRect(box, QColor(77, 77, 77, 128))
     return QColor("white")
@@ -200,6 +205,8 @@ class Canvas(QWidget):
             hh = nh * max(1, t.logo_scale) / 100.0
             ww = hh * nw / nh
             x, y = (t.logo_x, t.logo_y) if t.logo_place == "custom" else (50, 50)
+            if self.layout_id == "left":
+                x, y = 1920 - 50 - ww, 50
             lrect = QRectF(r.x() + x * s, r.y() + y * s, ww * s, hh * s)
             p.drawPixmap(lrect, logo, QRectF(logo.rect()))
             self._logo = (lrect, x, y, ww, hh)
@@ -220,6 +227,20 @@ class Canvas(QWidget):
                 y = r.y() + r.height() * 0.52 + i * 52 * s
                 col = QColor("white")
                 if i == 1:     # pretend the mouse is over the 2nd button
+                    row_h = fm.height() + 6 * s
+                    box = QRectF(x - pad, y - fm.ascent() - 3 * s, fm.horizontalAdvance("MULTIPLAYER") + 2 * pad, row_h)
+                    col = draw_list_highlight(p, box, t, t.list_highlight)
+                p.setPen(col)
+                p.drawText(QPointF(x, y), name)
+        elif lid == "left":
+            fm = QFontMetricsF(font)
+            pad = 20 * s
+            count = len(LABELS)
+            for i, name in enumerate(LABELS):
+                x = r.x() + 78 * s
+                y = r.y() + r.height() * 0.5 + (i - (count - 1) / 2.0) * 52 * s + fm.ascent() / 2
+                col = QColor("white")
+                if i == 1:
                     row_h = fm.height() + 6 * s
                     box = QRectF(x - pad, y - fm.ascent() - 3 * s, fm.horizontalAdvance("MULTIPLAYER") + 2 * pad, row_h)
                     col = draw_list_highlight(p, box, t, t.list_highlight)
@@ -412,7 +433,7 @@ class PreviewPanel(QWidget):
 class HighlightGallery(QWidget):
     """The three hover-highlight looks side by side. Click one to choose it."""
     chosen = Signal(str)
-    MODES = (("default", "MTF default"), ("white", "White box"), ("caption", "Caption bar"))
+    MODES = (("default", "MTF default"), ("white", "Inverted Hover"), ("caption", "Caption bar"))
 
     def __init__(self):
         super().__init__()
